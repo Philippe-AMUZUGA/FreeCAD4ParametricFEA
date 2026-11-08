@@ -1,0 +1,38 @@
+# Publication sur PyPI par "editeur de confiance" (OIDC) : aucun jeton n'est stocke dans le depot.
+# PREREQUIS (a faire par l'auteur, sur son compte PyPI) : declarer ce depot et ce workflow comme editeur de confiance
+# (PyPI > Your projects / Publishing > Add a new pending publisher : owner Philippe-AMUZUGA, repository
+# FreeCAD4ParametricFEA, workflow publish.yml, environment pypi). Creer aussi l'environnement GitHub "pypi".
+# Declenchement : publication d'une release GitHub. Rien n'est publie tant que ces etapes ne sont pas faites.
+name: publish
+on:
+  release:
+    types: [published]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+  pypi-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/freecad4parametricfea
+    permissions:
+      id-token: write          # obligatoire pour l'editeur de confiance (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

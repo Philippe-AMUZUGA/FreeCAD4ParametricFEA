@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from . import __version__
@@ -25,6 +26,10 @@ TEMPLATE = {
 
 def cmd_doctor(a):
     print("freecad4parametricfea", __version__, "- Python", sys.version.split()[0])
+    print("interpreteur :", sys.executable or "inconnu")
+    if not shutil.which("python") and not shutil.which("python3"):
+        print("  `python` et `python3` ne sont pas dans le PATH : lancer avec l'interpreteur ci-dessus, par ex.\n"
+              "  \"%s\" -m freecad4parametricfea run etude.json" % sys.executable)
     try:
         inst = find_freecad(a.freecad)
     except FileNotFoundError as e:
@@ -90,8 +95,8 @@ def cmd_run(a):
 
 
 def cmd_reextract(a):
-    st = Study(a.config)
-    st.reextract()
+    st = Study(a.config, reextract_only=True)        # `model` facultatif : aucun modele n'est ouvert
+    st.reextract(out_dir=a.out)
     return 2 if any(not str(r.get("status")).startswith("ok") for r in st.results) else 0
 
 
@@ -129,8 +134,10 @@ def main(argv=None):
     p.add_argument("--workers", type=int)
     p.add_argument("--no-resume", action="store_true", help="recalcule tous les cas")
     p.set_defaults(fn=cmd_run)
-    p = sub.add_parser("reextract", help="redefinit les sorties sans relancer les calculs")
+    p = sub.add_parser("reextract", help="redefinit les sorties sans relancer les calculs (config reduite : "
+                                         "run.output_dir + outputs, et doe/variables ou doe.type = from_cases)")
     p.add_argument("config")
+    p.add_argument("--out", help="dossier des tableaux (sans toucher aux resultats d'origine)")
     p.set_defaults(fn=cmd_reextract)
     p = sub.add_parser("converge", help="etude de convergence au maillage du cas nominal")
     p.add_argument("config")

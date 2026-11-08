@@ -111,6 +111,8 @@ def extract_case(case_dir, outputs, values=None):
     out = {}
     names = dict(cf.meta.get("names", {}))
     names.update(values or {})
+    tol = float(outputs.get("outside_tol", OUTSIDE_TOL))
+    save_profiles = bool(outputs.get("save_profiles", True))
     # 1. maxima de tout le modele (comportement par defaut)
     g = outputs.get("global") or {}
     for f in g.get("fields", DEFAULT_FIELDS):
@@ -144,8 +146,9 @@ def extract_case(case_dir, outputs, values=None):
                 for f in fl:
                     out["%s_%s%s" % (p["name"], f, _unit_suffix(f))] = float(
                         _scalar_from_sample(f, smp, cf.nu)[0])
-                if gap[0] > OUTSIDE_TOL:
-                    raise ValueError("point hors de la matiere (ecart %.2g)" % gap[0])
+                if gap[0] > p.get("outside_tol", tol):
+                    raise ValueError("point hors de la matiere (ecart %.2g > outside_tol %.2g)"
+                                     % (gap[0], p.get("outside_tol", tol)))
             if p.get("tensor"):
                 for k, c in zip(F.COMPONENTS, (smp["stress"][0] if p.get("mode", "interpolate") != "nearest_node"
                                                else cf.stress[i])):
@@ -179,16 +182,66 @@ def extract_case(case_dir, outputs, values=None):
     # 6. segments d'appui : linearisation
     for seg in outputs.get("segments") or []:
         try:
-            cols = linearize_segment(cf, seg, names, case_dir)
+            cols = linearize_segment(cf, seg, names, case_dir, tol=tol,
+                                     save=seg.get("save_profile", save_profiles))
             out.update(cols)
         except Exception as e:
             warns.append("segment %s : %s" % (seg["name"], e))
     return out, warns
 
 
-def linearize_segment(cf, seg, names, case_dir):
+def rotate_about_axis(p, a0, a1, angle_deg):
+    """Rotation du point p autour de l'axe (a0 -> a1) d'un angle en degres (formule de Rodrigues)."""
+    k = np.asarray(a1, float) - np.asarray(a0, float)
+    nk = np.linalg.norm(k)
+    if nk == 0:
+        raise ValueError("axe d'azimut de longueur nulle")
+    k = k / nk
+    th = np.radians(float(angle_deg))
+    v = np.asarray(p, float) - np.asarray(a0, float)
+    r = v * np.cos(th) + np.cross(k, v) * np.sin(th) + k * np.dot(k, v) * (1.0 - np.cos(th))
+    return np.asarray(a0, float) + r
+
+
+def _azimuth_axis(az, names):
+    ax = az.get("axis", "z")
+    if isinstance(ax, str):
+        d = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}.get(ax.lower())
+        if d is None:
+            raise ValueError("azimuth.axis : x, y, z ou deux points [[..],[..]]")
+        a0 = np.array(expr.point(az.get("origin", [0, 0, 0]), names))
+        return a0, a0 + np.array(d, float)
+    return np.array(expr.point(ax[0], names)), np.array(expr.point(ax[1], names))
+
+
+def linearize_segment(cf, seg, names, case_dir, tol=None, save=True):
+    """Linearise un segment ; avec `azimuth` {axis, origin, angles_deg}, le segment est tourne autour de l'axe
+    pour chaque angle (angle 0 = segment tel que donne) et chaque colonne de sortie est la MOYENNE arithmetique
+    des valeurs obtenues aux differents azimuts (colonne `<nom>_n_azimuts` : nombre d'azimuts)."""
+    tol = OUTSIDE_TOL if tol is None else tol
+    tol = seg.get("outside_tol", tol)
     p1 = np.array(expr.point(seg["p1"], names))
     p2 = np.array(expr.point(seg["p2"], names))
+    az = seg.get("azimuth")
+    if not az:
+        return _linearize_one(cf, seg, p1, p2, tol, case_dir, save)
+    a0, a1 = _azimuth_axis(az, names)
+    angles = [float(a) for a in az["angles_deg"]]
+    acc = {}
+    for k, ang in enumerate(angles):
+        q1, q2 = rotate_about_axis(p1, a0, a1, ang), rotate_about_axis(p2, a0, a1, ang)
+        try:
+            cols = _linearize_one(cf, seg, q1, q2, tol, case_dir, save and k == 0)
+        except ValueError as e:
+            raise ValueError("azimut %g deg : %s" % (ang, e))
+        for key, v in cols.items():
+            acc.setdefault(key, []).append(v)
+    out = {key: float(np.mean(v)) for key, v in acc.items()}
+    out["%s_n_azimuts" % seg["name"]] = len(angles)
+    return out
+
+
+def _linearize_one(cf, seg, p1, p2, tol, case_dir, save):
     n = int(seg.get("n", 41))
     if n < 3:
         raise ValueError("au moins 3 points de lecture")
@@ -196,8 +249,11 @@ def linearize_segment(cf, seg, names, case_dir):
     s = np.linspace(0.0, t, n)
     pts = p1[None, :] + (p2 - p1)[None, :] * (s / t)[:, None]
     smp, gap = cf.at_points(pts)
-    if gap.max() > OUTSIDE_TOL:
-        raise ValueError("le segment sort de la matiere (ecart %.2g) : verifier p1 et p2" % gap.max())
+    if gap.max() > tol:
+        w = int(np.argmax(gap))
+        raise ValueError("le segment sort de la matiere (ecart %.2g > outside_tol %.2g au point %d/%d, "
+                         "xyz = %.4g, %.4g, %.4g) : verifier p1 et p2, ou augmenter outputs.outside_tol"
+                         % (gap.max(), tol, w + 1, n, pts[w, 0], pts[w, 1], pts[w, 2]))
     lin = L.linearize(s, smp["stress"])
     name = seg["name"]
     out = {}
@@ -222,7 +278,8 @@ def linearize_segment(cf, seg, names, case_dir):
         out["%s_eps_membrane_bending_max" % name] = float(max(
             F.equivalent_strain(lin_e["Sm_Sb_start"], cf.nu),
             F.equivalent_strain(lin_e["Sm_Sb_end"], cf.nu)))
-    save_profile(case_dir, name, lin, pts, smp, cf.nu)
+    if save:
+        save_profile(case_dir, name, lin, pts, smp, cf.nu)
     return out
 
 

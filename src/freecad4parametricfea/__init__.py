@@ -9,7 +9,7 @@ from .config import Config, DEFAULTS
 from .runner import Study, inspect_model
 from .locate import find_freecad
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["run", "Study", "Config", "DEFAULTS", "find_freecad", "inspect_model", "__version__"]
 
 

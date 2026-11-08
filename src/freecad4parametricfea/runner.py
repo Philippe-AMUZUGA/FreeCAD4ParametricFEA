@@ -21,7 +21,7 @@ from . import extract as EX
 from .config import Config
 from .locate import find_freecad
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 log = logging.getLogger("freecad4parametricfea")
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_worker.py")
@@ -59,10 +59,13 @@ class Case(object):
 
 
 class Study(object):
-    def __init__(self, config, freecad=None):
-        self.cfg = Config.from_any(config)
-        self.model = self.cfg.path(self.cfg["model"])
-        if not os.path.isfile(self.model):
+    def __init__(self, config, freecad=None, reextract_only=False):
+        """reextract_only : etude destinee a `reextract` seul ; `model` est alors facultatif (aucun modele n'est
+        ouvert) et seuls doe, variables, outputs et run.output_dir sont necessaires."""
+        self.cfg = Config.from_any(config, require_model=not reextract_only)
+        self.reextract_only = reextract_only
+        self.model = self.cfg.path(self.cfg["model"]) if self.cfg.get("model") else None
+        if not reextract_only and not os.path.isfile(self.model):
             raise FileNotFoundError("modele introuvable : %s" % self.model)
         self.out_dir = self.cfg.path(self.cfg["run"]["output_dir"])
         self._install = freecad
@@ -86,6 +89,8 @@ class Study(object):
     def build_cases(self):
         doe = self.cfg["doe"]
         variables = self.cfg["variables"]
+        if doe["type"] == "from_cases":
+            return self._cases_from_disk()
         if doe["type"] == "excel":
             path = self.cfg.path(doe["file"])
             cols, rows, sheet = DOE.read_excel_plan(path, doe.get("sheet"))
@@ -137,12 +142,42 @@ class Study(object):
             raise ValueError("le plan ne contient aucun cas")
         return cases
 
+    def _cases_from_disk(self):
+        """doe.type = from_cases : les cas sont lus dans <output_dir>/cases/*/case.json (plan et parametres
+        enregistres au calcul) ; aucun plan, aucun modele, aucune variable a redonner."""
+        root = os.path.join(self.out_dir, "cases")
+        cases = []
+        if os.path.isdir(root):
+            for name in sorted(os.listdir(root)):
+                p = os.path.join(root, name, "case.json")
+                if not (name.startswith("case_") and os.path.isfile(p)):
+                    continue
+                with open(p) as fh:
+                    cj = json.load(fh)
+                c = Case(int(cj["index"]), dict(cj.get("plan") or {}))
+                c.params = dict(cj.get("params") or {})
+                for k, v in c.row.items():
+                    if _is_number(v):
+                        c.values[k] = float(v)
+                        c.values[k.replace(".", "_")] = float(v)
+                cases.append(c)
+        if not cases:
+            raise ValueError("doe.type = from_cases : aucun cas calcule dans %s" % root)
+        self.plan_columns = [k for k in cases[0].row if not str(k).startswith(("#", "_"))]
+        self.cases = sorted(cases, key=lambda c: c.index)
+        return self.cases
+
     def _salt(self):
+        if self.model is None or not os.path.isfile(self.model):
+            return ""                       # reextraction sans modele : la signature de reprise n'est pas utilisee
         if self._salt_cache is None:
             h = hashlib.sha1()
             with open(self.model, "rb") as fh:
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
+            if self.cfg.get("hook"):
+                with open(self.cfg.path(self.cfg["hook"]), "rb") as fh:
+                    h.update(fh.read())
             h.update(json.dumps([self.cfg["mesh"], self.cfg["materials"], self.cfg.get("analysis"),
                                  self.cfg.get("solver"), self.cfg["outputs"], __version__],
                                 sort_keys=True, default=str).encode())
@@ -158,6 +193,7 @@ class Study(object):
         ents = [{"name": e["name"], "object": e["object"], "subelement": e["subelement"]}
                 for e in out.get("entities") or []]
         return {"model": self.model, "case_dir": case.dir, "case_id": case.index,
+                "hook": self.cfg.path(c["hook"]) if c.get("hook") else None,
                 "params": case.params, "values": case.values, "materials": c["materials"],
                 "variables": c["variables"],
                 "mesh": mesh, "analysis": c.get("analysis"), "solver": c.get("solver"),
@@ -203,6 +239,11 @@ class Study(object):
         if os.path.exists(meta_path):
             with open(meta_path) as fh:
                 meta = json.load(fh)
+            meta["index"] = case.index                      # rattachement du dossier au plan
+            meta["config"] = self.config_number(case)
+            meta["plan"] = {k: _jsonable(v) for k, v in case.row.items()}
+            with open(meta_path, "w") as fh:
+                json.dump(meta, fh, indent=1, default=str)
         if rc == "timeout":
             row["error"] = "depassement du delai (%s s)" % self.cfg["run"]["timeout_s"]
         elif meta.get("status") != "ok":
@@ -226,7 +267,8 @@ class Study(object):
         row["mesh_size_mm"] = m.get("size")
         row["time_s"] = round(time.time() - t0, 2)
         with open(os.path.join(case.dir, "case.json"), "w") as fh:
-            json.dump({"index": case.index, "row": row, "params": case.params,
+            json.dump({"index": case.index, "config": self.config_number(case), "row": row,
+                       "params": case.params,
                        "plan": {k: _jsonable(v) for k, v in case.row.items()}}, fh, indent=1,
                       default=str)
         if not self.cfg["run"]["keep_fields"]:
@@ -235,6 +277,12 @@ class Study(object):
         if not self.cfg["run"]["keep_solver_files"] and row["status"].startswith("ok"):
             shutil.rmtree(os.path.join(case.dir, "ccx"), ignore_errors=True)   # conserve pour diagnostic si echec
         return row
+
+    def config_number(self, case):
+        """Numero de configuration du plan (colonne `doe.config_column`, `Config` par defaut) ou None."""
+        col = self.cfg["doe"].get("config_column") or "Config"
+        v = _jsonable(case.row.get(col))
+        return v
 
     def _plots(self, case):
         warns = []
@@ -250,6 +298,8 @@ class Study(object):
 
     # ------------------------------------------------------------------------------ l'etude
     def run(self, progress=print):
+        if self.reextract_only:
+            raise RuntimeError("etude ouverte pour la reextraction seule : `run` demande la configuration complete")
         os.makedirs(self.out_dir, exist_ok=True)
         _setup_log(self.out_dir)
         lock, lock_path = _acquire_lock(self.out_dir)
@@ -286,7 +336,8 @@ class Study(object):
                 results[case.index] = row
                 count[0] += 1
                 with open(os.path.join(self.out_dir, "results.jsonl"), "a") as fh:
-                    fh.write(json.dumps({"key": case.key, "index": case.index, "row": row},
+                    fh.write(json.dumps({"key": case.key, "index": case.index,
+                                         "config": self.config_number(case), "row": row},
                                         default=str) + "\n")
                 progress("[%d/%d] cas %d : %s (%.1f s)%s" % (
                     count[0], len(todo), case.index, row["status"], row["time_s"],
@@ -357,8 +408,12 @@ class Study(object):
         return paths
 
     # ---------------------------------------------------------------- extraction sans recalcul
-    def reextract(self, progress=print):
-        """Recalcule les sorties a partir des champs conserves (aucun appel a FreeCAD)."""
+    def reextract(self, progress=print, out_dir=None):
+        """Recalcule les sorties a partir des champs conserves (aucun appel a FreeCAD).
+
+        out_dir : si fourni, les tableaux (results.csv, classeur) sont ecrits dans ce dossier, sur une COPIE
+        du classeur du plan, et les resultats du calcul d'origine ne sont pas touches ; les champs sont
+        lus dans le dossier de sortie de l'etude."""
         if not self.cases:
             self.build_cases()
         results = {}
@@ -378,7 +433,17 @@ class Study(object):
             except Exception as exc:
                 row = {"status": "error", "error": "reextraction : %s" % exc}
             results[c.index] = row
-        paths = self._write_tables(results)
+        if out_dir:
+            fields_dir, in_place = self.out_dir, self.cfg["doe"].get("in_place")
+            self.out_dir = self.cfg.path(out_dir)
+            os.makedirs(self.out_dir, exist_ok=True)
+            self.cfg["doe"]["in_place"] = False
+            try:
+                paths = self._write_tables(results)
+            finally:
+                self.out_dir, self.cfg["doe"]["in_place"] = fields_dir, in_place
+        else:
+            paths = self._write_tables(results)
         self.results = [self._merged(i, results[i]) for i in sorted(results)]
         progress("reextraction terminee -> %s" % paths.get("xlsx"))
         return self.results

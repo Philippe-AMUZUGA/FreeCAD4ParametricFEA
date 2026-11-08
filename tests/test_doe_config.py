@@ -77,3 +77,23 @@ def test_config_defaults_and_validation(tmp_path):
     p.write_text(json.dumps({"model": "sub/m.FCStd"}), encoding="utf-8")
     c = Config.from_any(str(p))
     assert c.path(c["model"]) == os.path.normpath(os.path.join(str(tmp_path), "sub", "m.FCStd"))
+
+
+def test_excel_in_place_rewrites_its_own_sheet(tmp_path):
+    """Les ecritures successives (sauvegardes periodiques) remplacent la feuille de resultats du paquet ;
+    une feuille de l'utilisateur de meme nom n'est jamais supprimee."""
+    src = tmp_path / "p.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.append(["a"])
+    wb.active.append([1])
+    ws = wb.create_sheet("Resultats")
+    ws.append(["note de l'utilisateur"])
+    wb.save(src)
+    for k in range(3):
+        doe.write_results_excel(str(tmp_path / "x.xlsx"), ["a"], ["y"], [{"a": 1, "y": k}],
+                                source=str(src), in_place=True)
+    names = openpyxl.load_workbook(src).sheetnames
+    assert names.count("Resultats") == 1 and len(names) == 3
+    wb2 = openpyxl.load_workbook(src)
+    assert wb2["Resultats"]["A1"].value == "note de l'utilisateur"
+    assert wb2["Resultats_2"]["B2"].value == 2

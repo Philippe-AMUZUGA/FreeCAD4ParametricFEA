@@ -72,6 +72,9 @@ def read_excel_plan(path, sheet=None):
     return [n for _, n in cols], out, ws.title
 
 
+RESULT_TAB_COLOR = "002E8B57"       # marque les feuilles de resultats ecrites par le paquet
+
+
 def _unique_sheet_name(wb, base):
     name, k = base[:31], 1
     while name in wb.sheetnames:
@@ -98,7 +101,11 @@ def write_results_excel(dest, plan_columns, out_columns, table, source=None, she
         target = dest
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
+    for old in list(wb.worksheets):          # feuille deja ecrite par une ecriture precedente (marquee) : remplacee
+        if (old.title == sheet[:31] or old.title.startswith(sheet[:27] + "_")) and                 getattr(old.sheet_properties.tabColor, "rgb", None) == RESULT_TAB_COLOR:
+            wb.remove(old)
     ws = wb.create_sheet(_unique_sheet_name(wb, sheet))
+    ws.sheet_properties.tabColor = RESULT_TAB_COLOR
     cols = list(plan_columns) + [c for c in out_columns if c not in plan_columns]
     ws.append(cols)
     for row in table:

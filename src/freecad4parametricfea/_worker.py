@@ -21,6 +21,19 @@ import traceback
 MARK = "[f4pfea] "
 
 
+def _load_meshguard():
+    """Charge _meshguard.py (a cote de ce script) par son chemin : rien d'autre du paquet n'est importe."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_meshguard.py")
+    spec = importlib.util.spec_from_file_location("f4pfea_meshguard", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MG = _load_meshguard()
+
+
 def log(msg):
     sys.stdout.write(MARK + str(msg) + "\n")
     sys.stdout.flush()
@@ -294,13 +307,14 @@ def estimate_size(App, shape, cfg):
     # garde-fou : nombre d'elements estime (tetraedre regulier : volume = h^3 / 8.5)
     vol = shape.Volume if shape.Volume else (bb.XLength * bb.YLength * bb.ZLength)
     max_el = float(cfg.get("max_elements", 400000))
-    est = vol / (h ** 3 / 8.5) if h > 0 else 0
+    est = vol / (h ** 3 / MG.TET_FACTOR) if h > 0 else 0
     if est > max_el:
-        h2 = (vol * 8.5 / max_el) ** (1.0 / 3.0)
+        h2 = (vol * MG.TET_FACTOR / max_el) ** (1.0 / 3.0)
         info["warning"] = "taille %.4g mm donnerait ~%d elements : portee a %.4g mm" % (h, est, h2)
         h = h2
     info["size"] = h
-    info["est_elements"] = int(vol / (h ** 3 / 8.5)) if h > 0 else 0
+    info["volume"] = vol
+    info["est_elements"] = MG.estimate_elements(vol, h)        # taille globale seule (zones raffinees : voir configure_mesh)
     return h, info
 
 
@@ -344,6 +358,8 @@ def configure_mesh(App, doc, ana, mesh_obj, cfg, names, info_out):
         info_out["rule"] = "model"
         return mesh_obj, None
     shape = shape_of(mesh_obj)
+    if isinstance(cfg.get("size"), str) and cfg["size"].strip().lower() != "auto":
+        cfg = dict(cfg, size=safe_eval(cfg["size"], names))      # taille donnee par une expression des parametres
     h, info = estimate_size(App, shape, cfg)
     info_out.update(info)
     order = str(cfg.get("order", "2nd"))
@@ -355,23 +371,36 @@ def configure_mesh(App, doc, ana, mesh_obj, cfg, names, info_out):
             mesh_obj.MeshSizeFromCurvature = int(cfg.get("n_curv", 12))
         if cfg.get("element_dimension") and hasattr(mesh_obj, "ElementDimension"):
             mesh_obj.ElementDimension = cfg["element_dimension"]
+        for prop, val in (cfg.get("gmsh") or {}).items():       # proprietes Gmsh du modele (ex. HighOrderOptimize)
+            if not hasattr(mesh_obj, prop):
+                raise ValueError("mesh.gmsh : propriete inconnue %s" % prop)
+            setattr(mesh_obj, prop, val)
     elif is_netgen:
         set_length(mesh_obj, "MaxSize", h)
         mesh_obj.SecondOrder = (order == "2nd")
     # raffinements locaux
     n_ref = 0
+    zones = []                                             # (aire des faces raffinees, taille locale)
     for i, r in enumerate(cfg.get("refine") or []):
-        n_ref += add_refinement(App, doc, mesh_obj, shape, r, names, h, i)
+        n_ref += add_refinement(App, doc, mesh_obj, shape, r, names, h, i, zones)
     info_out["n_refinements"] = n_ref
+    if zones:
+        extra = sum(MG.refined_extra_elements(a, s, h) for a, s in zones)
+        info_out["est_elements_refined"] = info_out.get("est_elements", 0) + extra
+        max_el = float(cfg.get("max_elements", 400000))
+        if info_out["est_elements_refined"] > max_el:
+            msg = ("avec les zones raffinees, ~%d elements estimes (> mesh.max_elements = %d) ; "
+                   "le maillage reel sera controle apres generation" % (info_out["est_elements_refined"], max_el))
+            info_out["warning"] = (info_out["warning"] + " ; " + msg) if info_out.get("warning") else msg
     return mesh_obj, h
 
 
-def add_refinement(App, doc, mesh_obj, shape, r, names, h_global, idx):
+def add_refinement(App, doc, mesh_obj, shape, r, names, h_global, idx, zones=None):
     import ObjectsFem
     import Part
     if mesh_kind(mesh_obj) != "gmsh":
         raise RuntimeError("le raffinement local demande le moteur Gmsh")
-    size = float(r.get("size", h_global / 2.0))
+    size = float(safe_eval(r["size"], names)) if r.get("size") is not None else h_global / 2.0   # nombre ou expression
     refs = []
     geo = mesh_obj.Shape
     if r.get("subelement"):
@@ -394,6 +423,16 @@ def add_refinement(App, doc, mesh_obj, shape, r, names, h_global, idx):
                 refs.append((geo, "Face%d" % k))
     if not refs:
         return 0
+    if zones is not None:
+        area = 0.0
+        for tgt_obj, sub in refs:
+            try:
+                sh = tgt_obj.Shape
+                sh = sh.Shape if hasattr(sh, "Shape") else sh
+                area += sh.getElement(sub).Area
+            except Exception:
+                pass
+        zones.append((area, size))
     nm = "F4PFEA_Refine%d" % idx
     if hasattr(ObjectsFem, "makeMeshRegion"):            # FreeCAD >= 1.0
         try:
@@ -431,7 +470,21 @@ def generate_mesh(App, doc, mesh_obj, keep=False):
     return fm
 
 
-def run_ccx(App, doc, ana, solver, workdir, threads):
+def _ccx_tail(workdir, n=4):
+    """Dernieres lignes utiles de la sortie de CalculiX (fichiers .sta / .dat / .cvg du dossier de calcul)."""
+    for ext in (".sta", ".dat"):
+        for name in sorted(os.listdir(workdir)) if os.path.isdir(workdir) else []:
+            if name.endswith(ext):
+                try:
+                    with open(os.path.join(workdir, name), "r", errors="replace") as fh:
+                        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+                    return lines[-n:]
+                except OSError:
+                    pass
+    return []
+
+
+def run_ccx(App, doc, ana, solver, workdir, threads, mesh_size=None):
     os.environ["OMP_NUM_THREADS"] = str(int(threads))
     os.environ["CCX_NPROC_EQUATIONS"] = str(int(threads))
     from femtools import ccxtools
@@ -451,7 +504,8 @@ def run_ccx(App, doc, ana, solver, workdir, threads):
         if o.TypeId == "Fem::FemResultObjectPython":
             res = o
     if res is None:
-        raise RuntimeError("le solveur n'a produit aucun resultat")
+        nn, ne = mesh_size or (None, None)
+        raise RuntimeError(MG.solver_failure_message(nn, ne, _ccx_tail(workdir)))
     return res
 
 
@@ -661,6 +715,9 @@ def run_case(App, doc, job, meta, case_dir):
         set_target(App, doc, target, value, materials)
     doc.recompute()
     bad = [o.Name for o in doc.Objects if "Invalid" in o.State]
+    if job.get("hook"):
+        # avec un crochet, les references FEM (FaceN) perimees sont reparees plus bas : seule la geometrie est jugee ici
+        bad = [o.Name for o in doc.Objects if "Invalid" in o.State and not o.TypeId.startswith("Fem::")]
     if bad:
         raise RuntimeError("geometrie invalide apres recalcul : %s" % ", ".join(bad))
     meta["time_geometry_s"] = time.time() - t
@@ -678,6 +735,19 @@ def run_case(App, doc, job, meta, case_dir):
                       "zmin": bb.ZMin, "zmax": bb.ZMax, "Lx": bb.XLength, "Ly": bb.YLength,
                       "Lz": bb.ZLength})
     meta["names"] = names
+    if job.get("hook"):
+        # crochet utilisateur : refait la selection des faces (conditions aux limites, charges) apres le recalcul
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("f4pfea_hook", job["hook"])
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        msg = mod.after_recompute(App, doc, dict(names))
+        doc.recompute()
+        bad = [o.Name for o in doc.Objects if "Invalid" in o.State]
+        if bad:
+            raise RuntimeError("geometrie invalide apres le crochet : %s" % ", ".join(bad))
+        if msg:
+            meta["warnings"].append("crochet : %s" % msg)
     t = time.time()
     minfo = {}
     mesh_obj, h = configure_mesh(App, doc, ana, mesh_obj, job.get("mesh") or {}, names, minfo)
@@ -691,11 +761,19 @@ def run_case(App, doc, job, meta, case_dir):
     if (job.get("mesh") or {}).get("refine") and not minfo.get("n_refinements"):
         meta["warnings"].append("raffinement demande mais aucune face selectionnee")
     meta["time_mesh_s"] = time.time() - t
+    if not keep:
+        # garde-fou apres maillage : le nombre reel d'elements (zones raffinees comprises) ne depasse pas le plafond
+        mcfg = job.get("mesh") or {}
+        w = MG.check_mesh_size(fm.VolumeCount or fm.FaceCount, mcfg.get("max_elements", 400000),
+                               mcfg.get("on_exceed", "error"))
+        if w:
+            meta["warnings"].append(w)
     t = time.time()
     wd = os.path.join(case_dir, "ccx")
     shutil.rmtree(wd, ignore_errors=True)             # jamais de resultats d'un calcul precedent
     os.makedirs(wd)
-    res = run_ccx(App, doc, ana, solver, wd, job.get("ccx_threads", 1))
+    res = run_ccx(App, doc, ana, solver, wd, job.get("ccx_threads", 1),
+                  (fm.NodeCount, fm.VolumeCount or fm.FaceCount))
     meta["time_solve_s"] = time.time() - t
     meta["reactions"] = parse_reactions(wd)
     E, nu = material_props(doc, ana)

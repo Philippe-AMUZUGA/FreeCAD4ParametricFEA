@@ -13,6 +13,8 @@ DEFAULTS = {
     "solver": None,                      # nom du solveur (premier de l'analyse sinon)
     "variables": {},                     # alias -> cible "Objet.cle"
     "materials": {},                     # nom de fiche -> {YoungsModulus, PoissonRatio, Density}
+    "hook": None,                        # fichier Python avec after_recompute(App, doc, names) : execute dans FreeCAD apres
+                                         # chaque recalcul (ex. : reattribuer les faces des conditions aux limites par la geometrie)
     "doe": {                             # plan d'experiences
         "type": "full",                  # "full" (plan complet) | "excel" | "none" (un seul calcul)
         "levels": {},                    # pour "full" : alias -> liste | "debut:fin:n" | {start, stop, num}
@@ -21,6 +23,7 @@ DEFAULTS = {
         "result_sheet": "Resultats",     # nom de la feuille ajoutee
         "in_place": False,               # True : ecrit la feuille dans le fichier d'origine
         "ignore_columns": [],            # colonnes recopiees mais jamais appliquees au modele
+        "config_column": "Config",       # colonne du plan donnant le numero de configuration (ecrit dans meta.json)
     },
     "mesh": {
         "engine": "auto",                # auto (celui du modele) | gmsh | netgen | keep (ne pas toucher)
@@ -32,11 +35,14 @@ DEFAULTS = {
         "size_factor": 1.0,              # multiplicateur (2 = maillage 2x plus grossier)
         "min_size": None, "max_size": None,
         "order": "2nd",                  # "1st" | "2nd"
-        "max_elements": 400000,          # garde-fou : la taille est augmentee au-dela
+        "max_elements": 400000,          # garde-fou : la taille est augmentee au-dela ; le maillage reel est controle ensuite
+        "on_exceed": "error",            # maillage reel > max_elements : "error" (cas en echec, solveur non lance) | "warn" | "ignore"
         "refine": [],                    # raffinements locaux (voir documentation)
     },
     "outputs": {
         "global": {"fields": ["vonMises", "Tresca", "S1", "U", "eps_vm"], "location": False},
+        "outside_tol": 0.02,             # ecart barycentrique tolere pour un point / segment (hors matiere au-dela)
+        "save_profiles": True,           # ecrit linearization_<segment>.csv dans le dossier de chaque cas
         "reactions": True,
         "points": [], "nodes": [], "entities": [], "segments": [],
     },
@@ -96,7 +102,8 @@ class Config(dict):
     """Dictionnaire de configuration complete (valeurs par defaut incluses)."""
 
     @classmethod
-    def from_any(cls, source, base_dir=None):
+    def from_any(cls, source, base_dir=None, require_model=True):
+        """require_model=False : `model` facultatif (reextraction, qui n'ouvre aucun modele)."""
         if isinstance(source, Config):
             return source
         if isinstance(source, (str, os.PathLike)):
@@ -107,7 +114,7 @@ class Config(dict):
             data = dict(source)
         cfg = cls(_merge(DEFAULTS, data))
         cfg.base_dir = os.path.abspath(base_dir or os.getcwd())
-        cfg.validate()
+        cfg.validate(require_model)
         return cfg
 
     base_dir = os.getcwd()
@@ -119,12 +126,19 @@ class Config(dict):
         p = os.path.expanduser(str(p))
         return p if os.path.isabs(p) else os.path.normpath(os.path.join(self.base_dir, p))
 
-    def validate(self):
-        if not self.get("model"):
+    def validate(self, require_model=True):
+        if require_model and not self.get("model"):
             raise ValueError("configuration : la cle `model` (fichier .FCStd) est obligatoire")
         doe = self["doe"]
-        if doe["type"] not in ("full", "excel", "none"):
-            raise ValueError("doe.type doit valoir full, excel ou none")
+        if doe["type"] not in ("full", "excel", "none", "from_cases"):
+            raise ValueError("doe.type doit valoir full, excel, none ou from_cases")
+        if doe["type"] == "from_cases" and require_model:
+            raise ValueError("doe.type = from_cases ne sert qu'a `reextract` (cas deja calcules)")
+        if self["mesh"].get("on_exceed", "error") not in ("error", "warn", "ignore"):
+            raise ValueError("mesh.on_exceed doit valoir error, warn ou ignore")
+        tol = self["outputs"].get("outside_tol", 0.02)
+        if not isinstance(tol, (int, float)) or isinstance(tol, bool) or tol < 0:
+            raise ValueError("outputs.outside_tol doit etre un nombre >= 0")
         if doe["type"] == "excel" and not doe.get("file"):
             raise ValueError("doe.type = excel demande doe.file")
         if self["mesh"]["order"] not in ("1st", "2nd"):
@@ -143,6 +157,13 @@ class Config(dict):
         for s in self["outputs"].get("segments") or []:
             if "p1" not in s or "p2" not in s:
                 raise ValueError("segment %s : p1 et p2 sont obligatoires" % s["name"])
+            az = s.get("azimuth")
+            if az is not None:
+                if not isinstance(az, dict) or not az.get("angles_deg"):
+                    raise ValueError("segment %s : azimuth demande {\"axis\": ..., \"angles_deg\": [...]}" % s["name"])
+                if s.get("components"):
+                    raise ValueError("segment %s : `components` et `azimuth` sont incompatibles "
+                                     "(le repere local change avec l'azimut)" % s["name"])
         if self["run"]["workers"] < 1:
             raise ValueError("run.workers >= 1")
         return self
