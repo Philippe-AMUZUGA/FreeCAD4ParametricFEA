@@ -1,0 +1,12 @@
+{
+  "model": "cantilever.FCStd",
+  "variables": {"L": "Sketch.L", "h": "Sketch.h", "b": "Pad.Length", "P": "ConstraintForce.Force", "E": "MaterialSolid.YoungsModulus"},
+  "doe": {"type": "full", "levels": {"L": [80, 120], "h": [10, 14], "b": [10], "P": [100, 200]}},
+  "mesh": {"size": "auto"},
+  "outputs": {
+    "global": {"fields": ["vonMises", "Tresca", "U"], "location": true},
+    "points": [{"name": "Ptop", "xyz": ["L/2", "h", "b/2"], "fields": ["Sxx", "vonMises", "Tresca"]}],
+    "segments": [{"name": "SCL", "p1": ["L/2", "0", "b/2"], "p2": ["L/2", "h", "b/2"], "n": 41}]
+  },
+  "run": {"output_dir": "RES_full", "workers": 2}
+}

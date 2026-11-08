@@ -1,0 +1,10 @@
+{
+  "model": "cantilever.FCStd",
+  "doe": {"type": "none"},
+  "outputs": {
+    "global": {"fields": ["vonMises", "U"]},
+    "points": [{"name": "Ptop", "xyz": ["xmax/2", "ymax", "zmax/2"], "fields": ["Sxx"]}],
+    "segments": [{"name": "SCL", "p1": ["xmax/2", "ymin", "zmax/2"], "p2": ["xmax/2", "ymax", "zmax/2"], "n": 41}]
+  },
+  "run": {"output_dir": "RES_nominal", "workers": 3}
+}

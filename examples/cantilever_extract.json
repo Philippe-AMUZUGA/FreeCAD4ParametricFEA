@@ -1,0 +1,16 @@
+{
+  "model": "cantilever.FCStd",
+  "variables": {"L": "Sketch.L", "P": "ConstraintForce.Force"},
+  "doe": {"type": "full", "levels": {"L": [100], "P": [100]}},
+  "mesh": {"size": "auto", "refine": [{"point": ["0", "ymax", "zmax/2"], "radius": 6, "size": 1.2}]},
+  "outputs": {
+    "global": {"fields": ["vonMises"], "location": true},
+    "points": [{"name": "Racine", "xyz": ["0.5", "ymax-0.01", "zmax/2"], "fields": ["vonMises", "Sxx"], "tensor": true},
+               {"name": "Bord", "xyz": ["L", "ymax", "zmax"], "mode": "nearest_node", "fields": ["U", "vonMises"]}],
+    "nodes": [{"name": "N", "ids": [1, 2], "fields": ["vonMises"]}],
+    "entities": [{"name": "Encastr", "object": "Pad", "subelement": "Face4", "reduce": "max", "fields": ["vonMises", "Tresca"]},
+                 {"name": "Charge", "object": "Pad", "subelement": "Face2", "reduce": "mean", "fields": ["Uy"]}],
+    "segments": [{"name": "Appui", "p1": ["20", "0", "zmax/2"], "p2": ["20", "ymax", "zmax/2"], "n": 31, "strain": true, "components": true}]
+  },
+  "run": {"output_dir": "RES_extract", "plots": true}
+}

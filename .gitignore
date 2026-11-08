@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+RES/
+examples/RES_*/
+*.FCBak
+*.FCStd1
+~$*.xlsx

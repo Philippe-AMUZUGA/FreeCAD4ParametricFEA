@@ -1,0 +1,57 @@
+{
+  "model": "cantilever.FCStd",
+  "doe": {
+    "type": "excel",
+    "file": "plan_utilisateur.xlsx",
+    "sheet": "MonPlan",
+    "ignore_columns": [
+      "Commentaire"
+    ]
+  },
+  "outputs": {
+    "global": {
+      "fields": [
+        "vonMises",
+        "U"
+      ]
+    },
+    "points": [
+      {
+        "name": "Ptop",
+        "xyz": [
+          "L/2",
+          "h",
+          "zmax/2"
+        ],
+        "fields": [
+          "Sxx"
+        ]
+      }
+    ],
+    "segments": [
+      {
+        "name": "SCL",
+        "p1": [
+          "L/2",
+          "0",
+          "zmax/2"
+        ],
+        "p2": [
+          "L/2",
+          "h",
+          "zmax/2"
+        ],
+        "n": 41
+      }
+    ]
+  },
+  "run": {
+    "output_dir": "RES_excel",
+    "workers": 3
+  },
+  "variables": {
+    "L": "Sketch.L",
+    "h": "Sketch.h",
+    "P": "ConstraintForce.Force"
+  }
+}

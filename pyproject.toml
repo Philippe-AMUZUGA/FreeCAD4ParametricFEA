@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freecad4parametricfea"
+version = "0.1.0"
+description = "Calculs par elements finis parametriques pilotes depuis FreeCAD : maillage pilotable, extraction en points et segments avec linearisation, plan d'experiences Excel."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Philippe AMUZUGA" }]
+keywords = ["FreeCAD", "finite element", "parametric", "CalculiX", "linearization", "design of experiments"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = ["numpy", "openpyxl"]
+
+[project.urls]
+Homepage = "https://github.com/Philippe-AMUZUGA/FreeCAD4ParametricFEA"
+Issues = "https://github.com/Philippe-AMUZUGA/FreeCAD4ParametricFEA/issues"
+
+[project.optional-dependencies]
+full = ["scipy", "matplotlib", "pandas"]
+yaml = ["pyyaml"]
+test = ["pytest"]
+
+[project.scripts]
+freecad4parametricfea = "freecad4parametricfea.cli:main"
+f4pfea = "freecad4parametricfea.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+freecad4parametricfea = ["_worker.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["freecad: necessite une installation de FreeCAD"]

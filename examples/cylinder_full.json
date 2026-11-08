@@ -1,0 +1,11 @@
+{
+  "model": "cylinder.FCStd",
+  "variables": {"Ri": "CylIn.Radius", "Re": "CylOut.Radius", "Lz": "CylOut.Height", "p": "ConstraintPressure.Pressure"},
+  "doe": {"type": "full", "levels": {"Ri": [100], "Re": [110, 120, 150], "p": [10]}},
+  "mesh": {"size": "auto", "size_factor": 0.7},
+  "outputs": {
+    "global": {"fields": ["vonMises", "Tresca", "U"]},
+    "segments": [{"name": "SCL", "p1": ["Ri*0.70710678", "Ri*0.70710678", "Lz/2"], "p2": ["Re*0.70710678", "Re*0.70710678", "Lz/2"], "n": 41, "components": true}]
+  },
+  "run": {"output_dir": "RES_cyl", "workers": 3}
+}
